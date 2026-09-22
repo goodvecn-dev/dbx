@@ -490,6 +490,21 @@ export function useSqlExecution(deps: {
   async function executeTargetSql(input: TargetSqlExecutionInput): Promise<MultiDbTargetExecutionResult> {
     const { tab, connection, sql, sourceOffset, targetLabel } = input;
     const startedAt = Date.now();
+    let confirmationWaitMs = 0;
+    /**
+     * A danger or production prompt parks the target until the operator answers.
+     * Reading and typing that answer is not execution time, so it is excluded
+     * from the duration this target reports.
+     */
+    const waitForConfirmation = async <T>(prompt: () => Promise<T> | undefined): Promise<T | undefined> => {
+      const waitStartedAt = Date.now();
+      try {
+        return await prompt();
+      } finally {
+        confirmationWaitMs += Date.now() - waitStartedAt;
+      }
+    };
+    const elapsedMs = () => Math.max(0, Date.now() - startedAt - confirmationWaitMs);
     const executionTab = input.executionTarget
       ? {
           ...tab,
@@ -501,7 +516,7 @@ export function useSqlExecution(deps: {
       : tab;
     const finish = (result: MultiDbTargetExecutionResult): MultiDbTargetExecutionResult => ({
       ...result,
-      durationMs: Date.now() - startedAt,
+      durationMs: elapsedMs(),
     });
     const cancelRequested = () => input.isCancellationRequested?.() === true;
     const tabCancelRequested = (count: number) => (tab.cancelRequestCount ?? 0) !== count;
@@ -533,16 +548,18 @@ export function useSqlExecution(deps: {
         return finish({ status: "skipped", errorMessage: t("redis.blockedCommand", { command: "Redis" }) });
       }
       if (highestSafety === "confirm") {
-        const confirmed = await deps.requestDangerConfirmation?.({
-          sql,
-          kind: "redis",
-          connectionName: connection.name,
-          database: executionTab.database,
-          targetLabel,
-          targets: input.batchTargetLabels,
-          databaseType: connection.db_type,
-          scopeId: input.scopeId,
-        });
+        const confirmed = await waitForConfirmation(() =>
+          deps.requestDangerConfirmation?.({
+            sql,
+            kind: "redis",
+            connectionName: connection.name,
+            database: executionTab.database,
+            targetLabel,
+            targets: input.batchTargetLabels,
+            databaseType: connection.db_type,
+            scopeId: input.scopeId,
+          }),
+        );
         if (cancelRequested()) return finish({ status: "cancelled" });
         if (!confirmed) return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
       }
@@ -550,29 +567,33 @@ export function useSqlExecution(deps: {
 
     const productionAssessment = assessProductionSql(sql, connection, executionTab.database);
     if (productionAssessment.active && productionAssessment.isMutation) {
-      const confirmed = await productionSafetyStore.requestConfirmation({
-        sql,
-        connectionName: connection.name,
-        database: executionTab.database,
-        productionDatabases: productionAssessment.databases,
-        source: t("production.sourceMultiDbSql"),
-        scopeId: input.scopeId,
-      });
+      const confirmed = await waitForConfirmation(() =>
+        productionSafetyStore.requestConfirmation({
+          sql,
+          connectionName: connection.name,
+          database: executionTab.database,
+          productionDatabases: productionAssessment.databases,
+          source: t("production.sourceMultiDbSql"),
+          scopeId: input.scopeId,
+        }),
+      );
       if (cancelRequested()) return finish({ status: "cancelled" });
       if (!confirmed) return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
     }
 
     if (isDangerousSql(sql, connection.db_type) && settingsStore.editorSettings.confirmDangerousSqlExecution) {
-      const confirmed = await deps.requestDangerConfirmation?.({
-        sql,
-        kind: "sql",
-        connectionName: connection.name,
-        database: executionTab.database,
-        targetLabel,
-        targets: input.batchTargetLabels,
-        databaseType: connection.db_type,
-        scopeId: input.scopeId,
-      });
+      const confirmed = await waitForConfirmation(() =>
+        deps.requestDangerConfirmation?.({
+          sql,
+          kind: "sql",
+          connectionName: connection.name,
+          database: executionTab.database,
+          targetLabel,
+          targets: input.batchTargetLabels,
+          databaseType: connection.db_type,
+          scopeId: input.scopeId,
+        }),
+      );
       if (cancelRequested()) return finish({ status: "cancelled" });
       if (!confirmed) return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
     }
@@ -593,7 +614,7 @@ export function useSqlExecution(deps: {
         target: input.resultRun.target,
         title: input.resultRun.title,
         status,
-        durationMs: Date.now() - startedAt,
+        durationMs: elapsedMs(),
         errorMessage,
       });
     };
@@ -716,7 +737,7 @@ export function useSqlExecution(deps: {
       const mergeResult = snapshotResultForMerge(latest.result);
       const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
       recordedRunId = captureWorkerResult(resultStatus, errorMessage);
-      const executionDuration = Date.now() - startedAt;
+      const executionDuration = elapsedMs();
       const recordOutcome = async () => {
         await historyStore.add({
           connection_id: executionTab.connectionId,

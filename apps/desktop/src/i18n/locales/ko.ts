@@ -476,6 +476,7 @@ export default withEnglishFallback({
     switchToSerial: "직렬로 전환",
     elapsed: "경과 시간: {duration}",
     pending: "대기 중",
+    awaitingConfirmation: "확인 대기 중",
     running: "실행 중",
     success: "성공",
     failed: "실패",

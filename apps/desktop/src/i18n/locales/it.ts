@@ -468,6 +468,7 @@ export default withEnglishFallback({
     switchToSerial: "Passa a seriale",
     elapsed: "Tempo trascorso: {duration}",
     pending: "In attesa",
+    awaitingConfirmation: "In attesa di conferma",
     running: "In esecuzione",
     success: "Riuscita",
     failed: "Non riuscita",

@@ -469,6 +469,7 @@ export default withEnglishFallback({
     switchToSerial: "直列に切り替え",
     elapsed: "経過時間：{duration}",
     pending: "待機中",
+    awaitingConfirmation: "確認待ち",
     running: "実行中",
     success: "成功",
     failed: "失敗",

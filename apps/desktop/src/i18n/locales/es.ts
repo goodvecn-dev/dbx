@@ -470,6 +470,7 @@ export default withEnglishFallback({
     switchToSerial: "Cambiar a secuencial",
     elapsed: "Tiempo transcurrido: {duration}",
     pending: "Pendiente",
+    awaitingConfirmation: "Esperando confirmación",
     running: "En ejecución",
     success: "Correcto",
     failed: "Fallido",

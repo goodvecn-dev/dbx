@@ -478,6 +478,7 @@ export default {
     switchToSerial: "Switch to serial",
     elapsed: "Elapsed: {duration}",
     pending: "Pending",
+    awaitingConfirmation: "Waiting for confirmation",
     running: "Running",
     success: "Success",
     failed: "Failed",

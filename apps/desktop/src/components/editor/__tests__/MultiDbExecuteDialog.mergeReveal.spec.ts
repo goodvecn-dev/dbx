@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { computed, createApp, h, nextTick, ref, type App, type Ref } from "vue";
+import { createPinia } from "pinia";
 import MultiDbExecuteDialog from "../MultiDbExecuteDialog.vue";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import type { MultiDbExecutionAdapter } from "@/composables/useMultiDbExecution";
 import type { QueryResult } from "@/types/database";
 
@@ -93,6 +95,7 @@ function mountDialog(executeTarget: MultiDbExecutionAdapter["executeTarget"], op
         executeTarget,
       }),
   });
+  app.use(createPinia());
   app.mount(root);
 }
 
@@ -182,6 +185,32 @@ describe("multi-database merged view reveal paths", () => {
     await executeBatch(executeTarget, { open, targets: [{ connectionId: "test", database: "db-a" }] });
 
     expect(document.querySelector("[data-multi-db-merge]")).toBeNull();
+  });
+
+  it("parks the clock and labels the target while its confirmation is on screen", async () => {
+    const open = ref(true);
+    const releases: Array<() => void> = [];
+    const executeTarget = vi.fn<MultiDbExecutionAdapter["executeTarget"]>(async (input) => {
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return { status: "success" as const, durationMs: 3, result: resultFor(input.target.database) };
+    });
+    await executeBatch(executeTarget, { open });
+
+    const batchId = document.querySelector("[data-multi-db-batch-id]")?.getAttribute("data-multi-db-batch-id");
+    expect(batchId).toBeTruthy();
+    // The prompt the batch is waiting for, as the danger store publishes it.
+    useSqlExecutionDangerStore().pending = { sql: SQL, kind: "sql", scopeId: batchId ?? undefined, targetLabel: "Test / db-a" };
+    await nextTick();
+
+    // The parked target is waiting for the operator, not running.
+    expect(document.body.textContent).toContain("multiDbExecute.awaitingConfirmation");
+    const elapsedBefore = document.querySelector("[data-multi-db-elapsed]")?.textContent;
+    expect(elapsedBefore).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    await nextTick();
+    expect(document.querySelector("[data-multi-db-elapsed]")?.textContent).toBe(elapsedBefore);
+
+    releases.splice(0).forEach((release) => release());
   });
 
   it("announces a batch that finished while minimized with an action into the merged view", async () => {

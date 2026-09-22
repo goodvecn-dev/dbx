@@ -394,6 +394,7 @@ export default withEnglishFallback({
     switchToSerial: "切换为串行",
     elapsed: "耗时：{duration}",
     pending: "等待中",
+    awaitingConfirmation: "等待确认",
     running: "执行中",
     success: "成功",
     failed: "失败",

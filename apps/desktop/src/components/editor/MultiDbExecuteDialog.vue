@@ -15,6 +15,7 @@ import { useMultiDbExecution, type MultiDbExecutionAdapter, type MultiDbExecutio
 import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
 import { useMultiDbTargetSelection, type MultiDbTargetCatalogOption, type SqlExecutionTargetValidationReason } from "@/composables/useMultiDbTargetSelection";
 import { useSqlExecutionTargetGroupStore } from "@/stores/sqlExecutionTargetGroupStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { dedupeMultiDbExecutionTargets, multiDbExecutionTargetKey, type MultiDbExecutionTarget, type MultiDbExecutionItemStatus, type SqlExecutionTargetGroup, type SqlExecutionTargetValidation } from "@/types/sqlExecution";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -41,6 +42,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 const { addMultiDbExecutionTask, updateMultiDbExecutionTask, registerTaskCancelHandler, unregisterTaskCancelHandler } = useExportTracker();
 const targetGroupStore = useSqlExecutionTargetGroupStore();
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const targetSelection = useMultiDbTargetSelection(computed(() => props.databaseType));
 const compatibleConnections = targetSelection.compatibleConnections;
 
@@ -124,11 +126,44 @@ const progressCounts = computed(() => {
     pendingCommit: items.filter((item) => item.status === "pending_commit").length,
   };
 });
-const elapsedMs = computed(() => {
+/**
+ * A target parked on the danger confirmation is waiting for the operator, not
+ * executing: that wait must not count as batch time or as target time.
+ */
+const awaitingConfirmation = computed(() => {
+  const pending = sqlExecutionDangerStore.pending;
+  return pending !== undefined && pending.scopeId !== undefined && pending.scopeId === batch.value?.id;
+});
+const confirmationWaitMs = ref(0);
+/** Value shown while a prompt is on screen, so the clock visibly stands still. */
+const frozenElapsedMs = ref<number>();
+let confirmationWaitStartedAt: number | undefined;
+/** Batch time with every answered prompt already taken out. */
+function elapsedWithoutWaits(): number {
   const current = batch.value;
   if (!current) return 0;
-  return current.durationMs ?? Math.max(0, (current.completedAt ?? currentTime.value) - current.startedAt);
+  const total = current.durationMs ?? Math.max(0, (current.completedAt ?? currentTime.value) - current.startedAt);
+  return Math.max(0, total - confirmationWaitMs.value);
+}
+watch(awaitingConfirmation, (waiting, wasWaiting) => {
+  if (waiting) {
+    confirmationWaitStartedAt = Date.now();
+    frozenElapsedMs.value = elapsedWithoutWaits();
+    return;
+  }
+  if (wasWaiting && confirmationWaitStartedAt !== undefined) {
+    confirmationWaitMs.value += Date.now() - confirmationWaitStartedAt;
+    confirmationWaitStartedAt = undefined;
+    frozenElapsedMs.value = undefined;
+  }
 });
+/** Label of the target whose confirmation is on screen, when one is parked. */
+const awaitingTargetLabel = computed(() => (awaitingConfirmation.value ? sqlExecutionDangerStore.pending?.targetLabel : undefined));
+function isAwaitingTarget(item: { target: MultiDbExecutionTarget; status: MultiDbExecutionItemStatus }): boolean {
+  if (item.status !== "running" || awaitingTargetLabel.value === undefined) return false;
+  return targetLabel(item.target) === awaitingTargetLabel.value;
+}
+const elapsedMs = computed(() => (awaitingConfirmation.value && frozenElapsedMs.value !== undefined ? frozenElapsedMs.value : elapsedWithoutWaits()));
 
 /** Merged multi-source view over the results this batch produced. */
 const mergeViewOpen = ref(false);
@@ -879,10 +914,10 @@ watch(
       </DialogHeader>
 
       <div v-if="executionStarted && batch" class="flex min-h-0 flex-1 flex-col">
-        <div class="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3 text-xs text-muted-foreground tabular-nums">
+        <div class="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-3 text-xs text-muted-foreground tabular-nums" :data-multi-db-batch-id="batch.id">
           <span>{{ t("multiDbExecute.progress", { completed: progressCompleted, total: batch.items.length }) }}</span>
           <Badge variant="secondary">{{ executionModeLabel() }}</Badge>
-          <span class="tabular-nums">{{ t("multiDbExecute.elapsed", { duration: formatDataTransferDuration(elapsedMs) }) }}</span>
+          <span class="tabular-nums" data-multi-db-elapsed>{{ t("multiDbExecute.elapsed", { duration: formatDataTransferDuration(elapsedMs) }) }}</span>
           <Badge variant="outline">{{ t("multiDbExecute.success") }} {{ progressCounts.success }}</Badge>
           <Badge variant="outline">{{ t("multiDbExecute.failed") }} {{ progressCounts.failed }}</Badge>
           <Badge variant="outline">{{ t("multiDbExecute.skipped") }} {{ progressCounts.skipped }}</Badge>
@@ -894,7 +929,7 @@ watch(
           ref="mergeViewRef"
           :items="mergeItems"
           :sql="batch.sql"
-          :duration-ms="batch.durationMs ?? elapsedMs"
+          :duration-ms="elapsedMs"
           :executed-at="batch.startedAt"
           :show-export-actions="false"
           :rerun-disabled="isExecuting"
@@ -915,7 +950,7 @@ watch(
               <div v-else class="mt-0.5 h-4 w-4 shrink-0 rounded-full border border-muted-foreground/40" />
               <div class="min-w-0 flex-1">
                 <div class="truncate text-sm" :class="statusClass(item.status)">{{ targetLabel(item.target) }}</div>
-                <div class="text-xs text-muted-foreground">{{ statusLabel(item.status) }}</div>
+                <div class="text-xs text-muted-foreground">{{ isAwaitingTarget(item) ? t("multiDbExecute.awaitingConfirmation") : statusLabel(item.status) }}</div>
                 <div v-if="item.durationMs !== undefined" class="text-xs tabular-nums text-muted-foreground">{{ t("multiDbExecute.elapsed", { duration: formatDataTransferDuration(item.durationMs) }) }}</div>
                 <div v-if="item.errorMessage" class="mt-1 whitespace-pre-wrap break-words text-xs text-destructive">{{ item.errorMessage }}</div>
               </div>
