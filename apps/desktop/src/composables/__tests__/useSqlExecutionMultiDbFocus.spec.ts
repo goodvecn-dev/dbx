@@ -15,6 +15,7 @@
 import { computed, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { useSqlExecution } from "../useSqlExecution";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -312,5 +313,28 @@ describe("preservedResultIndex staleness theory", () => {
     const options = executeTabSql.mock.calls[0]?.[2] ?? {};
     expect(options).not.toHaveProperty("preserveActiveResultIndex");
     expect(tab.activeResultIndex).toBe(0);
+  });
+
+  it("reads one multi-database target up to the per-source row cap, not just the editor page", async () => {
+    const sql = "SELECT 1 AS value";
+    const tab = { ...queryTab(), sql };
+    const connection = sqlServerConnection();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeTabSql = vi.spyOn(queryStore, "executeTabSql").mockImplementation(async () => true);
+    vi.spyOn(queryStore, "getExecutionTab").mockReturnValue(tab);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => tab as QueryTab | undefined),
+      activeConnection: computed(() => connection),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.executeTargetSql({ tab, connection, sql });
+
+    expect(MULTI_SOURCE_MAX_ROWS_PER_SOURCE).toBe(10_000);
+    expect(executeTabSql.mock.calls[0]?.[2]).toMatchObject({ pagination: { limit: MULTI_SOURCE_MAX_ROWS_PER_SOURCE, offset: 0 } });
   });
 });

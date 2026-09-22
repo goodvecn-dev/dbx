@@ -1,5 +1,6 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
 import type { MultiDbExecutionTarget, MultiDbExecutionItemStatus, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
+import type { QueryResult } from "@/types/database";
 
 export interface MultiDbExecutionItem {
   id: string;
@@ -11,6 +12,8 @@ export interface MultiDbExecutionItem {
   durationMs?: number;
   transaction?: MultiDbManualTransaction;
   settling?: boolean;
+  /** Result produced by this target, kept for the merged multi-source view. */
+  result?: QueryResult;
 }
 
 export interface MultiDbExecutionBatch {
@@ -158,6 +161,7 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       item.status = current.cancelRequested && result.status === "failed" ? "cancelled" : result.status;
       item.errorMessage = result.errorMessage;
       item.durationMs = result.durationMs;
+      item.result = result.result;
       item.transaction = result.transaction;
     } catch (error) {
       // One target is intentionally isolated from the queue. Adapter errors

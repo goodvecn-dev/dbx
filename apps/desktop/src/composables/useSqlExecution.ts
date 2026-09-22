@@ -28,10 +28,11 @@ import { assessProductionSql } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
-import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
+import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { translateBackendError } from "@/i18n/backend-errors";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
@@ -66,6 +67,8 @@ interface TargetSqlExecutionInput {
   sourceOffset?: number;
   blockDangerousRedisCommands?: boolean;
   targetLabel?: string;
+  /** Labels of every target in the batch, shown in the confirmation prompt. */
+  batchTargetLabels?: string[];
   scopeId?: string;
   isCancellationRequested?: () => boolean;
   targetContext?: SqlExecutionTargetContext;
@@ -77,6 +80,27 @@ export function stripSqlComments(sql: string): string {
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--.*$/gm, " ")
     .replace(/#.*$/gm, " ");
+}
+
+/**
+ * Detached copy of a result for the merged multi-source view.
+ *
+ * The store releases a result payload by clearing its columns/rows *in place*
+ * (see `releaseResultObjectPayload`) as soon as the run loses focus, and a
+ * multi-db worker's tab is removed right after it finishes. Holding the live
+ * result would therefore let the merged view lose earlier sources, so the
+ * arrays it reads are detached here (cells themselves are never mutated).
+ */
+export function snapshotResultForMerge(result: QueryResult | undefined): QueryResult | undefined {
+  if (!result) return undefined;
+  return {
+    ...result,
+    columns: [...result.columns],
+    rows: result.rows.slice(),
+    column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: undefined,
+    local_hidden_column_keys: undefined,
+  };
 }
 
 const ELASTICSEARCH_TRANSIENT_DELETE_PATHS = [/^\/_search\/scroll\/?$/i, /^\/_pit\/?$/i, /^\/_async_search\/[^/?]+\/?$/i];
@@ -515,6 +539,7 @@ export function useSqlExecution(deps: {
           connectionName: connection.name,
           database: executionTab.database,
           targetLabel,
+          targets: input.batchTargetLabels,
           databaseType: connection.db_type,
           scopeId: input.scopeId,
         });
@@ -544,6 +569,7 @@ export function useSqlExecution(deps: {
         connectionName: connection.name,
         database: executionTab.database,
         targetLabel,
+        targets: input.batchTargetLabels,
         databaseType: connection.db_type,
         scopeId: input.scopeId,
       });
@@ -668,6 +694,10 @@ export function useSqlExecution(deps: {
       } else
         await queryStore.executeTabSql(executionTabId, sql, {
           resultBaseSql: sql,
+          // A multi-database run is read to be inspected and exported as one
+          // merged table, so every source fetches a real body of rows instead of
+          // the editor's first page. The user's own result-row limit still wins.
+          pagination: { limit: MULTI_SOURCE_MAX_ROWS_PER_SOURCE, offset: 0 },
           ...(input.targetContext ? { targetContext: input.targetContext } : {}),
           ...(sourceOffset !== undefined ? { sourceOffset } : {}),
           ...(connection.db_type === "redis" ? { skipRedisSafetyCheck: !blockRedisCommands } : {}),
@@ -680,6 +710,10 @@ export function useSqlExecution(deps: {
       const failure = firstQueryExecutionError(latest);
       const errorMessage = failure ? (failure.error ? translateBackendError(t, failure.error, failure.rows?.[0]?.[0]) : String(failure.rows?.[0]?.[0] ?? t("common.failed"))) : undefined;
       const success = !failure;
+      // The produced result travels back with the target status so the dialog can
+      // union every target's rows into the merged multi-source view. Snapshot it
+      // before recording the run: later cleanup releases the worker payload.
+      const mergeResult = snapshotResultForMerge(latest.result);
       const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
       recordedRunId = captureWorkerResult(resultStatus, errorMessage);
       const executionDuration = Date.now() - startedAt;
@@ -712,7 +746,7 @@ export function useSqlExecution(deps: {
         transaction.canCommit = true;
         retainedWorker = true;
         recordCommittedOutcome = recordOutcome;
-        return finish({ status: "pending_commit", transaction });
+        return finish({ status: "pending_commit", transaction, result: mergeResult });
       }
       await recordOutcome();
       if (input.manualTransaction) return await failedManualResult("failed", errorMessage);
@@ -723,7 +757,9 @@ export function useSqlExecution(deps: {
       if (!workerId && deps.activeTab.value?.id === tab.id) {
         deps.activeOutputView.value = success && latest.result?.server_message === true ? "messages" : success && (latest.result?.columns.length || latest.results?.some((result) => result.columns.length)) ? "result" : "summary";
       }
-      return finish(success ? { status: "success", errorMessage } : { status: "failed", errorMessage });
+      // A target that ran inside a manual transaction keeps its own worker and
+      // session alive, and reports the transaction the merged view settles.
+      return finish(success ? { status: "success", errorMessage, result: mergeResult } : { status: "failed", errorMessage, result: mergeResult });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       captureWorkerResult("failed", errorMessage);

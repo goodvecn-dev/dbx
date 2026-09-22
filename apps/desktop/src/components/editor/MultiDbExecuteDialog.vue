@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, CheckSquare, ChevronDown, ChevronRight, FolderOpen, Layers, Loader2, MinusSquare, Pencil, Play, RefreshCw, Search, Settings2, Square, Trash2, X } from "@lucide/vue";
+import { AlertTriangle, Check, CheckSquare, ChevronDown, ChevronRight, Download, FolderOpen, Layers, Loader2, MinusSquare, Pencil, Play, RefreshCw, Search, Settings2, Square, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import MultiSourceMergeView from "@/components/editor/MultiSourceMergeView.vue";
 import { useToast } from "@/composables/useToast";
 import { useMultiDbExecution, type MultiDbExecutionAdapter, type MultiDbExecutionMode } from "@/composables/useMultiDbExecution";
 import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
@@ -129,6 +130,114 @@ const elapsedMs = computed(() => {
   return current.durationMs ?? Math.max(0, (current.completedAt ?? currentTime.value) - current.startedAt);
 });
 
+/** Merged multi-source view over the results this batch produced. */
+const mergeViewOpen = ref(false);
+const mergeViewRef = ref<InstanceType<typeof MultiSourceMergeView>>();
+const mergeItems = computed(() =>
+  (batch.value?.items ?? []).map((item) => ({
+    key: item.id,
+    label: targetLabel(item.target),
+    result: item.result,
+    status: item.status,
+    durationMs: item.durationMs,
+    errorMessage: item.errorMessage,
+    ...(item.transaction ? { transaction: { canCommit: item.transaction.canCommit, settling: item.settling === true } } : {}),
+  })),
+);
+/** Targets whose result is worth merging, settled or still inside a transaction. */
+const mergedResultCount = computed(() => (batch.value?.items ?? []).filter((item) => item.status === "success" || item.status === "pending_commit").length);
+/** Merging needs more than one source; the view also reports failed targets. */
+const canShowMergedResults = computed(() => !isExecuting.value && (batch.value?.items.length ?? 0) >= 2);
+const batchSettled = computed(() => batch.value !== undefined && batch.value.status !== "running" && batch.value.status !== "cancelling");
+/** The batch opened a transaction per target, so writes stay reviewable. */
+const mergeBatchIsTransactional = computed(() => batch.value?.context.manualTransaction === true || (batch.value?.items ?? []).some((item) => item.transaction !== undefined || item.status === "pending_commit" || item.status === "rolled_back"));
+
+/**
+ * Settles one target's transaction through the batch's own state machine.
+ * `commit` writes the changes of that target only; a target that errored has
+ * nothing to commit and is rolled back by the executor instead.
+ */
+async function settleMergeTargetTransaction(itemId: string, action: "commit" | "rollback"): Promise<void> {
+  const item = batch.value?.items.find((candidate) => candidate.id === itemId);
+  if (!item?.transaction || item.settling) return;
+  const settled = await execution.finishTransaction(itemId, action);
+  if (!settled) toast(item.errorMessage ? t("multiDbExecute.txnActionFailed", { message: item.errorMessage }) : t("common.failed"), 5000);
+}
+
+/** Commits every target that succeeded, leaving errored ones for a decision. */
+async function commitAllMergeTargets(): Promise<void> {
+  const targets = (batch.value?.items ?? []).filter((item) => item.transaction?.canCommit === true);
+  for (const item of targets) await settleMergeTargetTransaction(item.id, "commit");
+}
+
+/** Discards every still-open transaction of the batch. */
+async function rollbackAllMergeTargets(): Promise<void> {
+  const targets = (batch.value?.items ?? []).filter((item) => item.transaction !== undefined);
+  for (const item of targets) await settleMergeTargetTransaction(item.id, "rollback");
+}
+
+function revealMergedView(): void {
+  mergeViewOpen.value = true;
+}
+
+/**
+ * Re-runs the batch's statement on one target only — the merged view uses it to
+ * retry a target that failed without redoing the ones that succeeded.
+ */
+async function rerunMergeTarget(itemId: string): Promise<void> {
+  const current = batch.value;
+  const item = current?.items.find((candidate) => candidate.id === itemId);
+  if (!current || !item || isExecuting.value) return;
+  item.status = "running";
+  item.errorMessage = undefined;
+  const startedAt = Date.now();
+  try {
+    const result = await props.executeTarget({
+      target: item.target,
+      sourceTabId: current.sourceTabId,
+      sql: current.sql,
+      scopeId: current.id,
+      context: current.context,
+      isCancellationRequested: () => current.cancelRequested,
+    });
+    item.status = result.status;
+    item.errorMessage = result.errorMessage;
+    item.durationMs = result.durationMs ?? Date.now() - startedAt;
+    item.result = result.result;
+    item.transaction = result.transaction;
+  } catch (error) {
+    item.status = "failed";
+    item.errorMessage = error instanceof Error ? error.message : String(error);
+    item.durationMs = Date.now() - startedAt;
+  }
+}
+
+/**
+ * A finished batch that produced data on several targets is worth looking at,
+ * so reopening the dialog lands directly in the merged view instead of making
+ * the user click through the progress list again.
+ */
+function revealMergedViewWhenSettled(): void {
+  if (mergeViewOpen.value || !canShowMergedResults.value || !batchSettled.value) return;
+  revealMergedView();
+}
+
+/**
+ * The batch may finish while the dialog is minimized to the background task
+ * list. Announce it with an action that jumps straight into the merged view.
+ */
+function announceMergedViewInBackground(current: NonNullable<typeof batch.value>): void {
+  if (open.value || current.cancelRequested) return;
+  if (current.status !== "completed" || mergedResultCount.value < 2) return;
+  toast(t("multiDbExecute.backgroundBatchDone", { count: mergedResultCount.value }), 8000, {
+    label: t("multiDbExecute.mergeResults"),
+    onClick: () => {
+      open.value = true;
+      revealMergedView();
+    },
+  });
+}
+
 function syncBackgroundTask(current: NonNullable<typeof batch.value>): void {
   const items = current.items;
   const completed = items.filter((item) => !["pending", "running"].includes(item.status)).length;
@@ -172,7 +281,10 @@ watch(
       registerTaskCancelHandler(current.id, () => execution.cancel());
     }
     syncBackgroundTask(current);
-    if (current.status === "completed" || current.status === "cancelled") unregisterTaskCancelHandler(current.id);
+    if (current.status === "completed" || current.status === "cancelled") {
+      unregisterTaskCancelHandler(current.id);
+      announceMergedViewInBackground(current);
+    }
   },
   { deep: true, flush: "sync" },
 );
@@ -675,6 +787,7 @@ function openForNewBatch(): void {
   executionMode.value = "serial";
   manualTransaction.value = props.initialManualTransaction === true && supportsManualTransaction.value;
   trackedBatchId = undefined;
+  mergeViewOpen.value = false;
   manageGroups.value = false;
   selectedGroupId.value = undefined;
   searchText.value = "";
@@ -733,10 +846,15 @@ watch(
 watch(
   () => [open.value, props.launchId] as const,
   ([value, launchId]) => {
-    if (value && launchId !== initializedLaunchId) {
+    if (!value) return;
+    if (launchId !== initializedLaunchId) {
       initializedLaunchId = launchId;
       openForNewBatch();
+      return;
     }
+    // Reopened from the background task list: skip the progress list when the
+    // batch already has results worth merging.
+    revealMergedViewWhenSettled();
   },
   { immediate: true },
 );
@@ -756,7 +874,7 @@ watch(
       <DialogHeader class="shrink-0 border-b px-5 py-3">
         <DialogTitle class="flex items-center gap-2">
           <Layers class="h-5 w-5 text-primary" />
-          {{ executionStarted ? t("multiDbExecute.progress", { completed: progressCompleted, total: batch?.items.length ?? 0 }) : t("multiDbExecute.title") }}
+          {{ mergeViewOpen ? t("multiDbExecute.mergeResults") : executionStarted ? t("multiDbExecute.progress", { completed: progressCompleted, total: batch?.items.length ?? 0 }) : t("multiDbExecute.title") }}
         </DialogTitle>
       </DialogHeader>
 
@@ -771,7 +889,23 @@ watch(
           <Badge variant="outline">{{ t("multiDbExecute.notExecuted") }} {{ progressCounts.notExecuted }}</Badge>
           <Badge v-if="progressCounts.pendingCommit" variant="outline">{{ t("multiDbExecute.pendingCommit") }} {{ progressCounts.pendingCommit }}</Badge>
         </div>
-        <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <MultiSourceMergeView
+          v-if="mergeViewOpen"
+          ref="mergeViewRef"
+          :items="mergeItems"
+          :sql="batch.sql"
+          :duration-ms="batch.durationMs ?? elapsedMs"
+          :executed-at="batch.startedAt"
+          :show-export-actions="false"
+          :rerun-disabled="isExecuting"
+          :transactional="mergeBatchIsTransactional"
+          @rerun-target="rerunMergeTarget"
+          @commit-target="(key: string) => settleMergeTargetTransaction(key, 'commit')"
+          @rollback-target="(key: string) => settleMergeTargetTransaction(key, 'rollback')"
+          @commit-all="commitAllMergeTargets"
+          @rollback-all="rollbackAllMergeTargets"
+        />
+        <div v-else class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div class="space-y-2">
             <div v-for="item in batch.items" :key="item.id" class="flex min-w-0 items-start gap-3 rounded-md border px-3 py-2">
               <Loader2 v-if="item.status === 'running'" class="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" />
@@ -793,12 +927,30 @@ watch(
           </div>
         </div>
         <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
-          <Button v-if="isExecuting" variant="destructive" class="gap-1.5" @click="execution.cancel()">
-            <X class="h-4 w-4" />
-            {{ t("multiDbExecute.cancelBatch") }}
-          </Button>
-          <Button v-if="isExecuting && !batch.context.manualTransaction" variant="outline" @click="requestClose">{{ t("exportProgress.minimize") }}</Button>
-          <Button v-else @click="requestClose">{{ t("common.close") }}</Button>
+          <template v-if="mergeViewOpen">
+            <Button variant="outline" data-multi-db-merge-back @click="mergeViewOpen = false">{{ t("multiDbExecute.mergeResultsBack") }}</Button>
+            <Button variant="outline" data-multi-db-merge-export-page @click="mergeViewRef?.exportMergedRows('page')">
+              <Download class="h-4 w-4" />
+              {{ t("multiDbExecute.exportCurrentPage") }}
+            </Button>
+            <Button variant="outline" data-multi-db-merge-export-all @click="mergeViewRef?.exportMergedRows('all')">
+              <Download class="h-4 w-4" />
+              {{ t("multiDbExecute.exportAllRows") }}
+            </Button>
+            <Button @click="requestClose">{{ t("common.close") }}</Button>
+          </template>
+          <template v-else>
+            <Button v-if="isExecuting" variant="destructive" class="gap-1.5" @click="execution.cancel()">
+              <X class="h-4 w-4" />
+              {{ t("multiDbExecute.cancelBatch") }}
+            </Button>
+            <Button v-if="isExecuting && !batch.context.manualTransaction" variant="outline" @click="requestClose">{{ t("exportProgress.minimize") }}</Button>
+            <Button v-if="canShowMergedResults" variant="outline" class="gap-1.5" data-multi-db-merge @click="mergeViewOpen = true">
+              <Layers class="h-4 w-4" />
+              {{ t("multiDbExecute.mergeResults") }}
+            </Button>
+            <Button v-if="!isExecuting" @click="requestClose">{{ t("common.close") }}</Button>
+          </template>
         </DialogFooter>
       </div>
 
