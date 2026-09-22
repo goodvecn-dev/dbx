@@ -80,7 +80,9 @@ async function copyCode(): Promise<void> {
         </div>
         <p class="font-mono text-lg leading-6 tracking-[0.3em] text-foreground" data-multi-db-danger-code-value>{{ code }}</p>
         <Input id="multi-db-danger-code" v-model="codeInput" data-multi-db-danger-code class="h-8 font-mono tracking-widest" autocomplete="off" spellcheck="false" :placeholder="t('multiDbExecute.dangerConfirmCodePlaceholder')" />
-        <p class="text-[11px] leading-4 text-muted-foreground">{{ t("multiDbExecute.dangerConfirmCodeOnce") }}</p>
+        <!-- The whole batch is answered by this one code, so the instruction
+             has to stand out next to the input instead of blending into it. -->
+        <p class="text-xs leading-4 font-semibold text-destructive" data-multi-db-danger-code-once>{{ t("multiDbExecute.dangerConfirmCodeOnce") }}</p>
       </div>
     </template>
   </DangerConfirmDialog>

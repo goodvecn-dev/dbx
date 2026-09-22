@@ -488,6 +488,7 @@ export default withEnglishFallback({
     mergedSourceColumn: "來源",
     mergedSources: "{count} 個資料來源 · {rows} 列",
     mergedSourceRowCap: "單一資料來源最多讀取 {count} 列",
+    mergedWriteSummary: "{targets} 個目標 · 影響 {rows} 筆",
     mergedSourceCapReached: "有 {count} 個資料來源已達單源上限（{limit} 列），可能還有更多資料",
     mergedSummaryLabel: "合計",
     mergedSummaryCellHint: "{count} 個數字之和",

@@ -410,6 +410,7 @@ export default withEnglishFallback({
     mergedSourceColumn: "来源",
     mergedSources: "{count} 个数据源 · {rows} 行",
     mergedSourceRowCap: "单个数据源最多读取 {count} 行",
+    mergedWriteSummary: "{targets} 个目标 · 影响 {rows} 行",
     mergedSourceCapReached: "有 {count} 个数据源已达单源上限（{limit} 行），可能还有更多数据",
     mergedSummaryLabel: "合计",
     mergedSummaryCellHint: "{count} 个数字之和",

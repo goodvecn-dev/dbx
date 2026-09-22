@@ -117,11 +117,15 @@ function hasWrittenRows(item: (typeof props.items)[number]): boolean {
   return item.status === "success" || item.status === "pending_commit";
 }
 
-/** Affected rows are only meaningful for a statement that actually ran. */
+/** Affected rows are only meaningful for a statement that actually ran. The
+ *  column already names them, so the cell carries the bare count. */
 function affectedRowsText(item: (typeof props.items)[number]): string {
   if (!hasWrittenRows(item)) return "—";
-  return t("grid.rowsAffected", { count: item.result?.affected_rows ?? 0 });
+  return String(item.result?.affected_rows ?? 0);
 }
+
+/** Rows the batch wrote in total, summarized in the header for write statements. */
+const totalAffectedRows = computed(() => props.items.reduce((sum, item) => sum + (hasWrittenRows(item) ? (item.result?.affected_rows ?? 0) : 0), 0));
 
 function canRerun(item: (typeof props.items)[number]): boolean {
   // A target that still owns a session has to be settled before it is re-run.
@@ -259,15 +263,18 @@ defineExpose({ exportMergedRows });
 <template>
   <div class="flex min-h-0 flex-1 flex-col" data-multi-source-merge-view>
     <div class="flex shrink-0 flex-wrap items-center gap-2 border-b bg-muted/20 px-5 py-2 text-xs text-muted-foreground">
-      <span>{{ t("multiDbExecute.mergedSources", { count: merged.sources.length, rows: merged.rowCount }) }}</span>
-      <span>{{ t("multiDbExecute.mergedSourceRowCap", { count: perSourceCap }) }}</span>
-      <span v-if="cappedSourceCount > 0" class="font-medium text-amber-600 dark:text-amber-300" data-merge-source-cap-reached>
+      <!-- A write batch has no rows to merge: report what it touched instead of
+           the merged-source statistics, which would all read zero. -->
+      <span v-if="hasTabularResults">{{ t("multiDbExecute.mergedSources", { count: merged.sources.length, rows: merged.rowCount }) }}</span>
+      <span v-if="hasTabularResults">{{ t("multiDbExecute.mergedSourceRowCap", { count: perSourceCap }) }}</span>
+      <span v-else data-merge-write-summary>{{ t("multiDbExecute.mergedWriteSummary", { targets: items.length, rows: totalAffectedRows }) }}</span>
+      <span v-if="hasTabularResults && cappedSourceCount > 0" class="font-medium text-amber-600 dark:text-amber-300" data-merge-source-cap-reached>
         {{ t("multiDbExecute.mergedSourceCapReached", { count: cappedSourceCount, limit: perSourceCap }) }}
       </span>
-      <span v-if="merged.truncated" class="font-medium text-amber-600 dark:text-amber-300" data-merge-truncated>
+      <span v-if="hasTabularResults && merged.truncated" class="font-medium text-amber-600 dark:text-amber-300" data-merge-truncated>
         {{ t("multiDbExecute.mergedTruncated", { count: mergeCap }) }}
       </span>
-      <span v-if="hiddenRowCount > 0">{{ t("multiDbExecute.mergedRowLimit", { count: renderedRows.length, rows: merged.rowCount }) }}</span>
+      <span v-if="hasTabularResults && hiddenRowCount > 0">{{ t("multiDbExecute.mergedRowLimit", { count: renderedRows.length, rows: merged.rowCount }) }}</span>
       <span v-if="executedAt !== undefined" class="tabular-nums" data-merge-executed-at>{{ t("multiDbExecute.executedAtChip", { time: timestampText(executedAt) }) }}</span>
       <span v-if="durationMs !== undefined" class="tabular-nums" data-merge-duration>{{ t("multiDbExecute.elapsedColumn", { duration: durationText(durationMs) }) }}</span>
       <span v-if="sql" class="min-w-0 max-w-[420px] truncate font-mono" :title="sql" data-merge-sql>{{ sql }}</span>

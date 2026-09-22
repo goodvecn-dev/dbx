@@ -494,6 +494,7 @@ export default {
     mergedSourceColumn: "Source",
     mergedSources: "{count} data sources · {rows} rows",
     mergedSourceRowCap: "Up to {count} rows per data source",
+    mergedWriteSummary: "{targets} targets · {rows} rows affected",
     mergedSourceCapReached: "{count} data source(s) hit the per-source limit ({limit} rows); more rows may exist",
     mergedSummaryLabel: "SUM",
     mergedSummaryCellHint: "Sum of {count} numeric values",

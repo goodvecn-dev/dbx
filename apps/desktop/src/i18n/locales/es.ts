@@ -486,6 +486,7 @@ export default withEnglishFallback({
     mergedSourceColumn: "Origen",
     mergedSources: "{count} orígenes de datos · {rows} filas",
     mergedSourceRowCap: "Máximo {count} filas por origen de datos",
+    mergedWriteSummary: "{targets} destinos · {rows} filas afectadas",
     mergedSourceCapReached: "{count} origen(es) alcanzaron el límite por origen ({limit} filas); puede haber más datos",
     mergedSummaryLabel: "SUMA",
     mergedSummaryCellHint: "Suma de {count} valores numéricos",

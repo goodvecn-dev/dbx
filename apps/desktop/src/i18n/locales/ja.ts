@@ -485,6 +485,7 @@ export default withEnglishFallback({
     mergedSourceColumn: "取得元",
     mergedSources: "{count} 個のデータソース · {rows} 行",
     mergedSourceRowCap: "1 つのデータソースにつき最大 {count} 行",
+    mergedWriteSummary: "{targets} 個のターゲット · {rows} 行に影響",
     mergedSourceCapReached: "{count} 個のデータソースが単一ソース上限（{limit} 行）に達しました。さらにデータがある可能性があります",
     mergedSummaryLabel: "合計",
     mergedSummaryCellHint: "{count} 個の数値の合計",

@@ -190,6 +190,18 @@ describe("MultiSourceMergeView", () => {
       expect(rows[1]?.[4]).toContain("no such table");
     });
 
+    it("summarizes the batch by targets and affected rows instead of read statistics", async () => {
+      mounted = mountView(writeItems());
+      await nextTick();
+
+      expect(mounted.host.querySelector("[data-merge-write-summary]")?.textContent?.trim()).toBe(i18n.global.t("multiDbExecute.mergedWriteSummary", { targets: 2, rows: 12 }));
+      // A write batch must not advertise the per-source read cap it never uses.
+      expect(mounted.host.textContent).not.toContain(i18n.global.t("multiDbExecute.mergedSourceRowCap", { count: MULTI_SOURCE_MAX_ROWS_PER_SOURCE }));
+      // The column already names the count, so the cell carries the bare number.
+      const affected = [...(mounted.host.querySelectorAll("[data-merge-target-results] tbody tr") ?? [])].map((row) => [...row.querySelectorAll("td")][2]?.textContent?.trim());
+      expect(affected).toEqual(["12", "—"]);
+    });
+
     it("offers a re-run only for targets that did not succeed", async () => {
       const rerun: string[] = [];
       mounted = mountView(writeItems(), { onRerunTarget: (key: string) => rerun.push(key) });

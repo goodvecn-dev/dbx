@@ -492,6 +492,7 @@ export default withEnglishFallback({
     mergedSourceColumn: "원본",
     mergedSources: "데이터 원본 {count}개 · {rows}행",
     mergedSourceRowCap: "데이터 원본당 최대 {count}행",
+    mergedWriteSummary: "대상 {targets}개 · {rows}행 영향",
     mergedSourceCapReached: "{count}개 데이터 원본이 단일 원본 한도({limit}행)에 도달했습니다. 더 많은 데이터가 있을 수 있습니다",
     mergedSummaryLabel: "합계",
     mergedSummaryCellHint: "숫자 {count}개의 합계",
