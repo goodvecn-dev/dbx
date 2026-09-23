@@ -62,7 +62,7 @@ interface MergePlan {
   input: MultiSourceResultInput;
   result: QueryResult;
   /** Merged column ordinal for each source column ordinal. */
-  targetIndexes: number[];
+  targetIndexes: Map<number, number>;
 }
 
 function usableInput(input: MultiSourceResultInput): boolean {
@@ -153,8 +153,10 @@ export function mergeMultiSourceResults(inputs: readonly MultiSourceResultInput[
     }
     const result = input.result!;
     const occurrences = new Map<string, number>();
-    const targetIndexes: number[] = [];
+    const targetIndexes = new Map<number, number>();
+    const hiddenColumnIndexes = new Set(result.hidden_column_indexes ?? []);
     result.columns.forEach((column, sourceIndex) => {
+      if (hiddenColumnIndexes.has(sourceIndex)) return;
       const name = mergedColumnName(column, sourceIndex);
       const occurrence = occurrences.get(name) ?? 0;
       occurrences.set(name, occurrence + 1);
@@ -165,7 +167,7 @@ export function mergeMultiSourceResults(inputs: readonly MultiSourceResultInput[
         indexByLayoutKey.set(layoutKey, targetIndex);
         columns.push(name);
       }
-      targetIndexes.push(targetIndex);
+      targetIndexes.set(sourceIndex, targetIndex);
     });
     plans.push({ input, result, targetIndexes });
   }
@@ -198,7 +200,7 @@ export function mergeMultiSourceResults(inputs: readonly MultiSourceResultInput[
       key: plan.input.key,
       label: plan.input.label,
       rowCount: plan.result.rows.length,
-      columnCount: plan.result.columns.length,
+      columnCount: plan.targetIndexes.size,
     })),
     rowCount: rows.length,
     truncated,

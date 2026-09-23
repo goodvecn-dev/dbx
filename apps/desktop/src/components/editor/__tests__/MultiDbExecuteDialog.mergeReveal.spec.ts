@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   exportQueryResultsXlsx: vi.fn().mockResolvedValue(undefined),
   exportQueryResultXlsx: vi.fn().mockResolvedValue(undefined),
+  registerTaskCancelHandler: vi.fn(),
+  unregisterTaskCancelHandler: vi.fn(),
 }));
 
 // Parameters are rendered so a call that forgot them is visible in the DOM.
@@ -27,7 +29,7 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 vi.mock("@/stores/sqlExecutionTargetGroupStore", () => ({ useSqlExecutionTargetGroupStore: () => ({ getGroupsByDatabaseType: () => [], getGroup: () => undefined }) }));
 vi.mock("@/composables/useExportTracker", () => ({
   formatDataTransferDuration: String,
-  useExportTracker: () => ({ addMultiDbExecutionTask: vi.fn(), updateMultiDbExecutionTask: vi.fn(), registerTaskCancelHandler: vi.fn(), unregisterTaskCancelHandler: vi.fn() }),
+  useExportTracker: () => ({ addMultiDbExecutionTask: vi.fn(), updateMultiDbExecutionTask: vi.fn(), registerTaskCancelHandler: mocks.registerTaskCancelHandler, unregisterTaskCancelHandler: mocks.unregisterTaskCancelHandler }),
 }));
 vi.mock("@/composables/useMultiDbTargetSelection", () => ({
   useMultiDbTargetSelection: () => ({
@@ -65,6 +67,9 @@ afterEach(() => {
   document.body.innerHTML = "";
   mocks.toast.mockClear();
   mocks.exportQueryResultsXlsx.mockClear();
+  mocks.registerTaskCancelHandler.mockClear();
+  mocks.unregisterTaskCancelHandler.mockClear();
+  vi.restoreAllMocks();
 });
 
 async function flushPromises() {
@@ -79,7 +84,15 @@ function button(label: string): HTMLButtonElement {
 }
 
 /** Mounts with a reactive `open` so minimizing and reopening can be observed. */
-function mountDialog(executeTarget: MultiDbExecutionAdapter["executeTarget"], options: { open: Ref<boolean>; targets?: Array<{ connectionId: string; database: string }> }) {
+interface DialogOptions {
+  open: Ref<boolean>;
+  targets?: Array<{ connectionId: string; database: string }>;
+  launchId?: Ref<number>;
+  cancelTarget?: MultiDbExecutionAdapter["cancelTarget"];
+  cancelPending?: MultiDbExecutionAdapter["cancelPending"];
+}
+
+function mountDialog(executeTarget: MultiDbExecutionAdapter["executeTarget"], options: DialogOptions) {
   const root = document.createElement("div");
   document.body.append(root);
   app = createApp({
@@ -91,15 +104,17 @@ function mountDialog(executeTarget: MultiDbExecutionAdapter["executeTarget"], op
         sourceTabId: "source",
         databaseType: "oceanbase-oracle",
         initialTargets: options.targets ?? TWO_TARGETS,
-        launchId: 1,
+        launchId: options.launchId?.value ?? 1,
         executeTarget,
+        cancelTarget: options.cancelTarget,
+        cancelPending: options.cancelPending,
       }),
   });
   app.use(createPinia());
   app.mount(root);
 }
 
-async function executeBatch(executeTarget: MultiDbExecutionAdapter["executeTarget"], options: { open: Ref<boolean>; targets?: Array<{ connectionId: string; database: string }> }) {
+async function executeBatch(executeTarget: MultiDbExecutionAdapter["executeTarget"], options: DialogOptions) {
   mountDialog(executeTarget, options);
   await flushPromises();
   button("multiDbExecute.execute").click();
@@ -177,6 +192,118 @@ describe("multi-database merged view reveal paths", () => {
     expect(executeTarget.mock.calls[2]?.[0].target.database).toBe("db-b");
     expect(document.querySelector("[data-merge-rerun]")).toBeNull();
     expect(document.body.textContent).not.toContain("boom");
+  });
+
+  it("keeps deferred retries cancellable across reopen and rolls back their late transactions on unmount", async () => {
+    const open = ref(true);
+    const launchId = ref(1);
+    const cancelTarget = vi.fn().mockResolvedValue(undefined);
+    const cancelPending = vi.fn();
+    const finish = vi.fn().mockResolvedValue(undefined);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executeTarget = vi.fn<MultiDbExecutionAdapter["executeTarget"]>().mockResolvedValue({ status: "failed", errorMessage: "boom" });
+    await executeBatch(executeTarget, { open, launchId, cancelTarget, cancelPending });
+    const batchId = document.querySelector("[data-multi-db-batch-id]")?.getAttribute("data-multi-db-batch-id");
+    button("multiDbExecute.mergeResults").click();
+    await nextTick();
+    mocks.registerTaskCancelHandler.mockClear();
+    executeTarget.mockImplementationOnce(async () => {
+      await gate;
+      return { status: "pending_commit", transaction: { canCommit: true, finish } };
+    });
+    (document.querySelector("[data-merge-rerun]") as HTMLButtonElement).click();
+    await flushPromises();
+
+    expect(document.querySelector<HTMLButtonElement>("[data-merge-rerun]")?.disabled).toBe(true);
+    expect(mocks.registerTaskCancelHandler).toHaveBeenLastCalledWith(batchId, expect.any(Function));
+    const cancel = mocks.registerTaskCancelHandler.mock.calls.at(-1)![1] as () => Promise<void>;
+    open.value = false;
+    await flushPromises();
+    launchId.value += 1;
+    open.value = true;
+    await flushPromises();
+    expect(document.querySelector("[data-multi-db-batch-id]")?.getAttribute("data-multi-db-batch-id")).toBe(batchId);
+    expect(executeTarget).toHaveBeenCalledTimes(3);
+    await cancel();
+    expect(cancelTarget).toHaveBeenCalledExactlyOnceWith("source", batchId);
+    expect(cancelPending).toHaveBeenCalledExactlyOnceWith(batchId);
+    expect(executeTarget.mock.calls[2]![0].isCancellationRequested()).toBe(true);
+
+    app?.unmount();
+    app = undefined;
+    expect(finish).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() => expect(finish).toHaveBeenCalledExactlyOnceWith("rollback"));
+  });
+
+  it.each([0, 5000])("resets confirmation timing for a new batch with %i ms wait but preserves same-batch reopen", async (secondWaitMs) => {
+    let now = 1000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const open = ref(true);
+    const launchId = ref(1);
+    let release!: () => void;
+    let gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const executeTarget = vi.fn<MultiDbExecutionAdapter["executeTarget"]>(async (input) => {
+      if (input.target.database === "db-a") await gate;
+      return { status: "success", result: resultFor(input.target.database) };
+    });
+    await executeBatch(executeTarget, { open, launchId });
+    const firstBatchId = document.querySelector("[data-multi-db-batch-id]")?.getAttribute("data-multi-db-batch-id");
+    const dangerStore = useSqlExecutionDangerStore();
+    dangerStore.pending = { sql: SQL, kind: "sql", scopeId: firstBatchId ?? undefined, targetLabel: "Test / db-a" };
+    await nextTick();
+    now = 11_000;
+    dangerStore.pending = undefined;
+    await nextTick();
+    now = 11_100;
+    release();
+    await flushPromises();
+    expect(document.querySelector("[data-multi-db-elapsed]")?.textContent).toBe("multiDbExecute.elapsed(100)");
+
+    open.value = false;
+    await flushPromises();
+    open.value = true;
+    await flushPromises();
+    expect(document.querySelector("[data-multi-db-elapsed]")?.textContent).toBe("multiDbExecute.elapsed(100)");
+    expect(executeTarget).toHaveBeenCalledTimes(2);
+
+    now = 20_000;
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    launchId.value += 1;
+    await flushPromises();
+    button("multiDbExecute.execute").click();
+    await flushPromises();
+    const secondBatchId = document.querySelector("[data-multi-db-batch-id]")?.getAttribute("data-multi-db-batch-id");
+    expect(secondBatchId).not.toBe(firstBatchId);
+    if (secondWaitMs > 0) {
+      dangerStore.pending = { sql: SQL, kind: "sql", scopeId: secondBatchId ?? undefined, targetLabel: "Test / db-a" };
+      await nextTick();
+      now += secondWaitMs;
+      dangerStore.pending = undefined;
+      await nextTick();
+    }
+    now += 250;
+    release();
+    await flushPromises();
+    expect(document.querySelector("[data-multi-db-elapsed]")?.textContent).toBe("multiDbExecute.elapsed(250)");
+    button("multiDbExecute.mergeResults").click();
+    await nextTick();
+    button("multiDbExecute.exportAllRows").click();
+    await flushPromises();
+    const sheets = mocks.exportQueryResultsXlsx.mock.calls[0]?.[1] as Array<{ sheetName: string; rows: string[][] }>;
+    expect(
+      sheets
+        .find((sheet) => sheet.sheetName === "SQL")
+        ?.rows.flat()
+        .join("\n"),
+    ).toContain("250 ms");
   });
 
   it("keeps merging out of a single-target batch", async () => {

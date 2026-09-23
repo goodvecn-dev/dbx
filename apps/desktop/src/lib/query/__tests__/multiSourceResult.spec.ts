@@ -52,6 +52,45 @@ describe("mergeMultiSourceResults", () => {
     ]);
   });
 
+  it("excludes hidden middle columns without shifting source values or numeric summaries", () => {
+    const first = result(["name", "__DBX_PK_0", "amount", "region"], [["Alice", 17, 10, "north"]], { hidden_column_indexes: [1] });
+    const second = result(["amount", "name", "__DBX_PK_0"], [[20, "Bob", 23]], { hidden_column_indexes: [2] });
+    const merged = mergeMultiSourceResults(
+      [
+        { key: "a", label: "a", result: first },
+        { key: "b", label: "b", result: second },
+      ],
+      { sourceColumnLabel: "Source" },
+    );
+
+    expect(merged.columns).toEqual(["Source", "name", "amount", "region"]);
+    expect(merged.rows).toEqual([
+      ["a", "Alice", 10, "north"],
+      ["b", "Bob", 20, null],
+    ]);
+    expect(merged.summaries).toEqual([{ columnIndex: 2, column: "amount", sum: 30, count: 2 }]);
+    expect(merged.sources.map((source) => source.columnCount)).toEqual([3, 2]);
+    expect(first.columns).toEqual(["name", "__DBX_PK_0", "amount", "region"]);
+    expect(first.rows).toEqual([["Alice", 17, 10, "north"]]);
+  });
+
+  it("matches visible duplicate names and keeps unnamed columns at their source ordinals", () => {
+    const merged = mergeMultiSourceResults(
+      [
+        { key: "a", label: "a", result: result(["id", "id", "id", ""], [[99, 1, 2, 3]], { hidden_column_indexes: [0] }) },
+        { key: "b", label: "b", result: result(["id", "id", "__DBX_PK_0", ""], [[4, 5, 88, 6]], { hidden_column_indexes: [2] }) },
+      ],
+      { sourceColumnLabel: "Source" },
+    );
+
+    expect(merged.columns).toEqual(["Source", "id", "id", "column_4"]);
+    expect(merged.rows).toEqual([
+      ["a", 1, 2, 3],
+      ["b", 4, 5, 6],
+    ]);
+    expect(merged.summaries.map((summary) => summary.sum)).toEqual([5, 7, 9]);
+  });
+
   it("skips sources without a tabular payload instead of failing", () => {
     const merged = mergeMultiSourceResults(
       [

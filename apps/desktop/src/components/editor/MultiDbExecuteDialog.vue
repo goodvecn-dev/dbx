@@ -145,18 +145,27 @@ function elapsedWithoutWaits(): number {
   const total = current.durationMs ?? Math.max(0, (current.completedAt ?? currentTime.value) - current.startedAt);
   return Math.max(0, total - confirmationWaitMs.value);
 }
-watch(awaitingConfirmation, (waiting, wasWaiting) => {
-  if (waiting) {
-    confirmationWaitStartedAt = Date.now();
-    frozenElapsedMs.value = elapsedWithoutWaits();
-    return;
-  }
-  if (wasWaiting && confirmationWaitStartedAt !== undefined) {
-    confirmationWaitMs.value += Date.now() - confirmationWaitStartedAt;
-    confirmationWaitStartedAt = undefined;
-    frozenElapsedMs.value = undefined;
-  }
-});
+watch(
+  () => [batch.value?.id, awaitingConfirmation.value] as const,
+  ([batchId, waiting], [previousBatchId, wasWaiting]) => {
+    if (batchId !== previousBatchId) {
+      confirmationWaitMs.value = 0;
+      confirmationWaitStartedAt = undefined;
+      frozenElapsedMs.value = undefined;
+    }
+    if (waiting) {
+      confirmationWaitStartedAt = Date.now();
+      frozenElapsedMs.value = elapsedWithoutWaits();
+      return;
+    }
+    if (wasWaiting && confirmationWaitStartedAt !== undefined) {
+      confirmationWaitMs.value += Date.now() - confirmationWaitStartedAt;
+      confirmationWaitStartedAt = undefined;
+      frozenElapsedMs.value = undefined;
+    }
+  },
+  { flush: "sync" },
+);
 /** Label of the target whose confirmation is on screen, when one is parked. */
 const awaitingTargetLabel = computed(() => (awaitingConfirmation.value ? sqlExecutionDangerStore.pending?.targetLabel : undefined));
 function isAwaitingTarget(item: { target: MultiDbExecutionTarget; status: MultiDbExecutionItemStatus }): boolean {
@@ -220,31 +229,7 @@ function revealMergedView(): void {
  * retry a target that failed without redoing the ones that succeeded.
  */
 async function rerunMergeTarget(itemId: string): Promise<void> {
-  const current = batch.value;
-  const item = current?.items.find((candidate) => candidate.id === itemId);
-  if (!current || !item || isExecuting.value) return;
-  item.status = "running";
-  item.errorMessage = undefined;
-  const startedAt = Date.now();
-  try {
-    const result = await props.executeTarget({
-      target: item.target,
-      sourceTabId: current.sourceTabId,
-      sql: current.sql,
-      scopeId: current.id,
-      context: current.context,
-      isCancellationRequested: () => current.cancelRequested,
-    });
-    item.status = result.status;
-    item.errorMessage = result.errorMessage;
-    item.durationMs = result.durationMs ?? Date.now() - startedAt;
-    item.result = result.result;
-    item.transaction = result.transaction;
-  } catch (error) {
-    item.status = "failed";
-    item.errorMessage = error instanceof Error ? error.message : String(error);
-    item.durationMs = Date.now() - startedAt;
-  }
+  await execution.retry(itemId);
 }
 
 /**
@@ -313,10 +298,11 @@ watch(
       addMultiDbExecutionTask(current.id, t("multiDbExecute.title"), current.sourceTabId, () => {
         open.value = true;
       });
-      registerTaskCancelHandler(current.id, () => execution.cancel());
     }
     syncBackgroundTask(current);
-    if (current.status === "completed" || current.status === "cancelled") {
+    if (current.status === "running") {
+      registerTaskCancelHandler(current.id, () => execution.cancel());
+    } else if (current.status === "completed" || current.status === "cancelled") {
       unregisterTaskCancelHandler(current.id);
       announceMergedViewInBackground(current);
     }

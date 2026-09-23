@@ -60,6 +60,35 @@ function exportButton(selector: string): HTMLButtonElement {
 }
 
 describe("merged view export", () => {
+  it.each(["page", "all"])("omits hidden middle columns from the display, summaries and %s export", async (scope) => {
+    mounted = mountView({
+      items: [
+        { key: "a", label: "conn-a", status: "success", result: { ...result(["name", "__DBX_PK_0", "amount"], [["Alice", 987654, 10]]), hidden_column_indexes: [1] } },
+        { key: "b", label: "conn-b", status: "success", result: result(["amount", "name"], [[20, "Bob"]]) },
+      ],
+      sql: "SELECT name, amount FROM t",
+    });
+    await nextTick();
+
+    expect([...mounted.host.querySelectorAll("thead th")].map((cell) => cell.textContent?.trim())).toEqual([i18n.global.t("multiDbExecute.mergedSourceColumn"), "name", "amount"]);
+    expect([...mounted.host.querySelectorAll("tbody tr")].map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent?.trim()))).toEqual([
+      ["conn-a", "Alice", "10"],
+      ["conn-b", "Bob", "20"],
+    ]);
+    expect(mounted.host.querySelector("tfoot")?.textContent).toContain("30");
+    expect(mounted.host.textContent).not.toContain("__DBX_PK_0");
+    expect(mounted.host.textContent).not.toContain("987654");
+
+    exportButton(`[data-merge-export-${scope}]`).click();
+    await vi.waitFor(() => expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledTimes(1));
+    const sheet = (mocks.exportQueryResultsXlsx.mock.calls[0] as [string, Sheet[]])[1][0];
+    expect(sheet?.columns).toEqual([i18n.global.t("multiDbExecute.mergedSourceColumn"), "name", "amount"]);
+    expect(sheet?.rows).toEqual([
+      ["conn-a", "Alice", 10],
+      ["conn-b", "Bob", 20],
+    ]);
+  });
+
   it("exports every merged row plus a SQL sheet carrying the statement, the start time and the duration", async () => {
     mounted = mountView({
       items: [
